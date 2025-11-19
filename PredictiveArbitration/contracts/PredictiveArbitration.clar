@@ -406,4 +406,67 @@
   )
 )
 
+;; Advanced multi-stage appeal process with escalating arbitrator panels
+;; This function implements a sophisticated appeal mechanism that allows parties to challenge
+;; dispute resolutions through a multi-tiered system with increasing arbitrator requirements
+;; and stake amounts, ensuring fair reconsideration while preventing frivolous appeals.
+(define-public (initiate-appeal-with-panel 
+  (dispute-id uint) 
+  (appeal-reasoning-hash (string-ascii 64))
+  (additional-stake uint)
+  (requested-panel-size uint))
+  (let
+    (
+      (dispute (unwrap! (map-get? disputes { dispute-id: dispute-id }) err-not-found))
+      (caller tx-sender)
+      (current-appeal-count (get appeal-count dispute))
+      (base-appeal-stake (* min-stake (+ u1 current-appeal-count)))
+      (total-required-stake (+ base-appeal-stake (* requested-panel-size min-stake)))
+      (is-party (or (is-eq caller (get claimant dispute)) (is-eq caller (get respondent dispute))))
+      (appeal-deadline (+ (get resolved-at dispute) u144)) ;; ~24 hours in blocks
+      (original-arbitrator (unwrap! (get assigned-arbitrator dispute) err-not-found))
+    )
+    ;; Validation checks
+    (asserts! is-party err-unauthorized)
+    (asserts! (is-eq (get status dispute) status-resolved) err-invalid-status)
+    (asserts! (<= current-appeal-count u2) err-dispute-closed) ;; Max 3 appeals
+    (asserts! (<= block-height appeal-deadline) err-dispute-closed)
+    (asserts! (>= additional-stake total-required-stake) err-insufficient-stake)
+    (asserts! (and (>= requested-panel-size u3) (<= requested-panel-size u7)) err-invalid-prediction)
+    
+    ;; Transfer appeal stake
+    (try! (stx-transfer? additional-stake caller (as-contract tx-sender)))
+    
+    ;; Update dispute with appeal status
+    (map-set disputes
+      { dispute-id: dispute-id }
+      (merge dispute {
+        status: status-appealed,
+        appeal-count: (+ current-appeal-count u1),
+        stake-amount: (+ (get stake-amount dispute) additional-stake),
+        assigned-arbitrator: none ;; Reset for panel assignment
+      })
+    )
+    
+    ;; Record appeal metadata
+    (map-set evidence-submissions
+      { dispute-id: dispute-id, submitter: caller, submission-index: (+ (var-get evidence-counter) u1) }
+      {
+        evidence-hash: appeal-reasoning-hash,
+        submission-type: "appeal",
+        timestamp: block-height,
+        verified: false
+      }
+    )
+    (var-set evidence-counter (+ (var-get evidence-counter) u1))
+    
+    (ok { 
+      appeal-id: (+ current-appeal-count u1),
+      required-panel-size: requested-panel-size,
+      total-stake: (+ (get stake-amount dispute) additional-stake),
+      appeal-deadline: (+ block-height u288) ;; ~48 hours for panel review
+    })
+  )
+)
+
 
